@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="X-UA-Compatible" content="ie=edge">
+    <title>proximity</title>
+    <script>
+        function maxFrom(values) {
+            return values.reduce((m, v) => m < v ? v : m, 0);
+        }
+
+        function makePoint(svg, x, y) {
+            let p = svg.createSVGPoint();
+            p.x = x;
+            p.y = y;
+            return p;
+        }
+
+        function createSVGElement(node, tagName) {
+            return node.getRootNode().createElementNS("http://www.w3.org/2000/svg", tagName)
+        }
+
+        function makePolygon(svg, points, style = {fill: "none", stroke: "black"}) {
+            let p = createSVGElement(svg, "polygon");
+            points.forEach(([x, y]) => p.points.appendItem(makePoint(svg, x, y)));
+            Object.assign(p.style, style);
+            return p;
+        }
+
+        function makeCircle(node, center, radius, style = {}) {
+            let c = createSVGElement(node, "circle");
+            [c.cx.baseVal.value, c.cy.baseVal.value] = center;
+            c.r.baseVal.value = radius;
+            Object.assign(c.style, style);
+            return c;
+        }
+
+        function makeMarker(node, point) {
+            return makeCircle(node, point, 0.6, {fill: "red"});
+        }
+
+        function makeLine(node, from, to, style = {stroke: "black"}) {
+            let l = createSVGElement(node, "line");
+            [l.x1.baseVal.value, l.y1.baseVal.value] = from;
+            [l.x2.baseVal.value, l.y2.baseVal.value] = to;
+            Object.assign(l.style, style);
+            return l;
+        }
+
+        function makeGroup(node, children = []) {
+            let g = createSVGElement(node, "g");
+            for (let child of children) {
+                g.append(child);
+            }
+            return g;
+        }
+
+        function makeChart(node, values) {
+            let scale = 10 / maxFrom(values);
+            return makeGroup(node, values.map((v, i) => makeLine(node, [i, 0], [i, scale * v])));
+        }
+
+        function range({from = 0, to, step = 1}) {
+            let a = [];
+            let cmp = step < 0 ? ((v, t) => v > t) : ((v, t) => v < t);
+            for (let v = from; cmp(v, to); v += step) {
+                a.push(v);
+            }
+            return a;
+        }
+
+        function makeRadarChart(svg, values) {
+            let innerRadius = 5;
+            let outerRadius = 10;
+            let scale = (outerRadius - innerRadius) / maxFrom(values);
+            let step = 2 * Math.PI / values.length;
+            return makeGroup(svg, [
+                makeCircle(svg, [0, 0], outerRadius, {stroke: "lightblue", fill: "none", strokeWidth: "0.2"}),
+                ...range({from: outerRadius - 1, to: innerRadius, step: -1}).map(r => makeCircle(svg, [0, 0], r, {stroke: "lightblue", fill: "none", strokeWidth: "0.1"})),
+                makePolygon(svg, values.map((v, i) => {
+                    let angle = step * i;
+                    return [
+                        Math.cos(angle) * (scale * v + innerRadius),
+                        Math.sin(angle) * (scale * v + innerRadius),
+                    ];
+                }), {stroke: "none", fill: "rgba(0,255,0,0.5)"}),
+                makeCircle(svg, [0, 0], innerRadius, {stroke: "lightblue", fill: "lightblue", strokeWidth: "0.2"})
+            ]);
+        }
+
+        function renderShape({shape, min = 0, max = 2 * Math.PI, resolution, transformation = p => p}) {
+            let points = [];
+            let range = max - min;
+            for (let i = 0; i < resolution; i ++) {
+                points.push(transformation(shape(min + i / resolution * range)));
+            }
+            return points;
+        }
+
+        function epicycloid({radius, ratio}) {
+            let ratioPlus1 = ratio + 1;
+            return function(angle) {
+                return [
+                    radius * (ratioPlus1 * Math.cos(angle) - Math.cos(ratioPlus1 * angle)),
+                    radius * (ratioPlus1 * Math.sin(angle) - Math.sin(ratioPlus1 * angle)),
+                ];
+            }
+        }
+
+        function hypocycloid({radius, ratio, resolution}) {
+            let ratioMinus1 = ratio - 1;
+            return function(angle) {
+                return [
+                    radius * (ratioMinus1 * Math.cos(angle) + Math.cos(ratioMinus1 * angle)),
+                    radius * (ratioMinus1 * Math.sin(angle) - Math.sin(ratioMinus1 * angle)),
+                ]
+            }
+        }
+
+        function ellipse(radii) {
+            return function(angle) {
+                return [
+                    radii[0] * Math.cos(angle),
+                    radii[1] * Math.sin(angle),
+                ];
+            }
+        }
+
+        function squaredDistance(lhs, rhs) {
+            let dx = lhs[0] - rhs[0];
+            let dy = lhs[1] - rhs[1];
+            return dx * dx + dy * dy;
+        }
+
+        function closest(referencePoint, candidatePoints) {
+            return candidatePoints.reduce((result, p) => {
+                let sqd = squaredDistance(referencePoint, p);
+                if (sqd < result.squaredDistance) {
+                    result.squaredDistance = sqd;
+                    result.point = p;
+                }
+                return result;
+            }, {point: null, squaredDistance: Infinity});
+        }
+
+        function boundingBoxUnion(...boundingBoxes) {
+            let l = Infinity;
+            let t = Infinity;
+            let r = -Infinity;
+            let b = -Infinity;
+            for (let bb of boundingBoxes) {
+                l = Math.min(l, bb.x);
+                t = Math.min(t, bb.y);
+                r = Math.max(r, bb.x + bb.width);
+                b = Math.max(b, bb.y + bb.height);
+            }
+            return {
+                x: l,
+                y: t,
+                width: r - l,
+                height: b - t,
+            };
+        }
+
+        function autocrop(svg) {
+            let bbox = svg.getBBox();
+            bbox.x -= 1;
+            bbox.y -= 1;
+            bbox.width += 2;
+            bbox.height += 2;
+            Object.assign(svg.viewBox.baseVal, boundingBoxUnion(bbox, svg.viewBox.baseVal));
+        }
+
+        function rotate(angle, point) {
+            let cosfi = Math.cos(angle);
+            let sinfi = Math.sin(angle);
+            return [
+                point[0] * cosfi - point[1] * sinfi,
+                point[0] * sinfi + point[1] * cosfi,
+            ];
+        }
+
+        function rotation(angle) {
+            return function(point) {
+                return rotate(angle, point);
+            }
+        }
+
+        function translate(offset, point) {
+            return [
+                point[0] + offset[0],
+                point[1] + offset[1],
+            ];
+        }
+
+        function translation(offset) {
+            return function(point) {
+                return translate(offset, point);
+            }
+        }
+
+        function combine(...ops) {
+            return function(point) {
+                return ops.reduce((p, op) => op(p), point);
+            }
+        }
+
+        function firstN(values, comparer, count) {
+            return values.reduce((res, elem) => {
+                res.push(elem);
+                res.sort(comparer);
+                return res.slice(0, count);
+            }, []);
+        }
+
+        function getLocalExtremumType(values, index, comparer) {
+            let before = comparer(values[(values.length + index - 1) % values.length], values[index]);
+            let after = comparer(values[index], values[(index + 1) % values.length]);
+            if (before > 0 && after < 0) return "minimum";
+            if (before < 0 && after > 0) return "maximum";
+            return null;
+        }
+
+        function localMinima(values, comparer) {
+            return values.filter((_, i) => getLocalExtremumType(values, i, comparer) == "minimum");
+        }
+
+        function makeSlider(node, {min = 0, max = 100, init = (max + min) / 2}) {
+            let s = node.getRootNode().createElement("input");
+            s.type = "range";
+            s.max = max;
+            s.min = min;
+            s.value = init;
+            return s;
+        }
+
+        function clearNode(node) {
+            while (node.children.length > 0) node.removeChild(node.firstChild);
+        }
+
+        function view(visSVG, insSVG, shape1, shape2, count) {
+            clearNode(visSVG);
+            clearNode(insSVG);
+
+            visSVG.append(shape1.getSVG(visSVG));
+            visSVG.append(shape2.getSVG(visSVG));
+
+            let [refShape, trgShape] = shape1.points.length < shape2.points.length ? [shape1, shape2] : [shape2, shape1];
+            let dists = refShape.points.map(p => ({ref: p, clo: closest(p, trgShape.points)}));
+            insSVG.append(makeRadarChart(insSVG, dists.map(({clo}) => clo.squaredDistance)));
+            //insSVG.append(makeChart(insSVG, dists.map(({clo}) => clo.squaredDistance)))
+
+            let minima = localMinima(dists, ({clo: lhs}, {clo: rhs}) => lhs.squaredDistance - rhs.squaredDistance);
+            let ms = firstN(minima, ({clo: lhs}, {clo: rhs}) => lhs.squaredDistance - rhs.squaredDistance, count);
+            ms.forEach(({ref, clo}) => {
+                visSVG.append(makeMarker(visSVG, ref));
+                visSVG.append(makeMarker(visSVG, clo.point));
+            });
+            autocrop(visSVG);
+            autocrop(insSVG);
+        }
+
+        function updateAngle(angle) {
+            let fi = angle / 180 * Math.PI;
+
+            let radius = 18;
+            let ratio = 1;
+
+            let radii = [radius * ratio + radius, radius * ratio];
+            let axisOffset = radius / 2;
+            let axisDelta = axisOffset;
+            let xf = combine(rotation(fi), translation([-axisDelta, 0]), rotation(-2 * fi), translation([-axisOffset, 0]));
+            let ecc = Math.sqrt(radii[0] * radii[0] - radii[1] * radii[1]);
+            let elli = {
+                points: renderShape({
+                    shape: ellipse(radii),
+                    resolution: 500,
+                    transformation: xf,
+                }),
+                getSVG: function(svg) {
+                    return makeGroup(svg, [
+                        makeGroup(svg, [
+                            makeLine(svg, [-1, 0], [1, 0], {stroke: "black", strokeWidth: "0.1"}),
+                            makeLine(svg, [0, -1], [0, 1], {stroke: "black", strokeWidth: "0.1"}),
+                        ]),
+
+                        makeCircle(svg, [-axisOffset, 0], axisDelta, {fill: "none", stroke: "lightblue", strokeWidth: "0.4", strokeDasharray: "1,1"}),
+
+                        makePolygon(svg, this.points, {fill: "none", stroke: "black", strokeWidth: "0.6"}),
+
+                        makeCircle(svg, xf([0, 0]), 0.5, {stroke: "none", fill: "black"}),
+                        makeCircle(svg, xf([ecc, 0]), 0.5, {stroke: "none", fill: "orange"}),
+                        makeCircle(svg, xf([-ecc, 0]), 0.5, {stroke: "none", fill: "cyan"}),
+                    ]);
+                },
+            };
+            let card = {
+                points: renderShape({
+                    shape: epicycloid({radius: radius, ratio: ratio}),
+                    resolution: 2000,
+                }),
+                getSVG: function(svg) {
+                    return makeGroup(svg, [
+                        makeCircle(svg, [0, 0], ratio * radius, {fill: "none", stroke: "lightgray", strokeWidth: "0.3", strokeDasharray: "1,1"}),
+                        makeCircle(svg, [-1 * (radius + ratio * radius), 0], radius, {fill: "none", stroke: "lightgray", strokeWidth: "0.3", strokeDasharray: "1,1"}),
+                        makePolygon(svg, this.points),
+                    ]);
+                },
+            }
+            view(visSVG, insSVG, card, elli, 3);
+        }
+    </script>
+</head>
+<body onload="{ visSVG = document.querySelector('#visualization'); insSVG = document.querySelector('#insight'); updateAngle(0); }">
+    <svg xmlns="http://www.w3.org/2000/svg" id="visualization" style="max-height: 80vh; max-width: 40vw;"></svg>
+    <svg xmlns="http://www.w3.org/2000/svg" id="insight" style="max-height: 50vh; max-width: 40vw;"></svg>
+    <span style="display: flex;">
+        <label for="angle">θ</label>: <input id="angle" type="range" min="-180" max="360" value="0" oninput="updateAngle(parseInt(this.value))">
+    </span>
+</body>
+</html>
